@@ -9,7 +9,7 @@ on:
 
 jobs:
   build:
-    runs-on: windows-latest
+    runs-on: windows-2022
 
     steps:
     - name: Checkout repository
@@ -20,33 +20,56 @@ jobs:
     - name: Setup MSBuild
       uses: microsoft/setup-msbuild@v2
 
-    - name: Install Windows Driver Kit
+    - name: Install WDK VSIX extension
       run: |
-        # Install WDK for VS 2022 via winget
-        # The windows-latest runner has VS 2022 pre-installed
-        # We need the WDK NuGet or direct install
-        choco install windowsdriverkit11 -y --no-progress
-      shell: powershell
-
-    - name: Find WDK and VS paths
-      id: paths
-      run: |
-        # Locate VS installation
-        $vsPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
-        Write-Host "VS Path: $vsPath"
-        
-        # Check for WDK
-        $wdkPaths = @(
-          "${env:ProgramFiles(x86)}\Windows Kits\10",
-          "${env:ProgramFiles}\Windows Kits\10"
+        # The windows-2022 runner has WDK installed but the VS extension may not be registered
+        # Find and install WDK.vsix
+        $vsixPaths = @(
+          "${env:ProgramFiles(x86)}\Windows Kits\10\Vsix\VS2022\WDK.vsix",
+          "${env:ProgramFiles(x86)}\Windows Kits\10\Vsix\VS2022\10.0.22621.0\WDK.vsix"
         )
-        foreach ($p in $wdkPaths) {
-          if (Test-Path $p) {
-            Write-Host "WDK found at: $p"
-            $versions = Get-ChildItem "$p\Include" -Directory | Sort-Object Name -Descending
-            Write-Host "Available WDK versions: $($versions.Name -join ', ')"
+        # Search more broadly
+        $found = Get-ChildItem -Path "${env:ProgramFiles(x86)}\Windows Kits\10\Vsix" -Recurse -Filter "WDK.vsix" -ErrorAction SilentlyContinue
+        if ($found) {
+          $vsixPath = $found[0].FullName
+          Write-Host "Found WDK VSIX at: $vsixPath"
+          
+          $vsixInstaller = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property enginePath | Join-Path -ChildPath 'VSIXInstaller.exe'
+          Write-Host "VSIX Installer: $vsixInstaller"
+          
+          # Install silently
+          Start-Process -FilePath $vsixInstaller -ArgumentList "/q", $vsixPath -Wait -NoNewWindow
+          Write-Host "WDK VSIX extension installed"
+        } else {
+          Write-Host "WDK VSIX not found, checking if WDK targets exist..."
+          # Check if WindowsDriver.common.targets exists
+          $targets = Get-ChildItem -Path "${env:ProgramFiles(x86)}\Windows Kits\10" -Recurse -Filter "WindowsDriver.common.targets" -ErrorAction SilentlyContinue
+          if ($targets) {
+            Write-Host "WDK targets found at: $($targets.FullName)"
+          } else {
+            Write-Host "WARNING: WDK targets not found!"
           }
         }
+      shell: powershell
+
+    - name: Verify WDK installation
+      run: |
+        Write-Host "=== WDK Include directories ==="
+        Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\Include" -Directory | ForEach-Object { Write-Host $_.FullName }
+        
+        Write-Host "`n=== Checking for ntifs.h ==="
+        $ntifs = Get-ChildItem -Path "${env:ProgramFiles(x86)}\Windows Kits\10\Include" -Recurse -Filter "ntifs.h" -ErrorAction SilentlyContinue
+        if ($ntifs) {
+          $ntifs | ForEach-Object { Write-Host "Found: $($_.FullName)" }
+        } else {
+          Write-Host "ntifs.h NOT found in WDK includes"
+        }
+        
+        Write-Host "`n=== WDK Build targets ==="
+        Get-ChildItem "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\Enterprise\MSBuild\Microsoft\VC\v170\Platforms" -Directory -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_.FullName }
+        
+        Write-Host "`n=== WindowsDriver targets ==="
+        Get-ChildItem -Path "C:\" -Recurse -Filter "WindowsDriver.KernelMode.props" -ErrorAction SilentlyContinue | Select-Object -First 5 | ForEach-Object { Write-Host $_.FullName }
       shell: powershell
 
     - name: Build Driver (Nidhogg.sys) - Release x64
@@ -62,26 +85,12 @@ jobs:
     - name: Collect artifacts
       run: |
         mkdir artifacts
-        # Driver
-        if (Test-Path "x64\Release\Nidhogg\Nidhogg.sys") {
-          Copy-Item "x64\Release\Nidhogg\Nidhogg.sys" artifacts\
-        }
-        if (Test-Path "x64\Release\Nidhogg.sys") {
-          Copy-Item "x64\Release\Nidhogg.sys" artifacts\
-        }
-        # Client
-        if (Test-Path "x64\Release\NidhoggClient.exe") {
-          Copy-Item "x64\Release\NidhoggClient.exe" artifacts\
-        }
-        if (Test-Path "x64\Release\NidhoggClient\NidhoggClient.exe") {
-          Copy-Item "x64\Release\NidhoggClient\NidhoggClient.exe" artifacts\
-        }
-        # Search more broadly for output files
-        Get-ChildItem -Recurse -Include "Nidhogg.sys","NidhoggClient.exe" | ForEach-Object {
+        # Search for output files
+        Get-ChildItem -Recurse -Include "Nidhogg.sys","NidhoggClient.exe","Nidhogg.pdb","NidhoggClient.pdb" | ForEach-Object {
           Write-Host "Found: $($_.FullName)"
           Copy-Item $_.FullName artifacts\ -Force
         }
-        Write-Host "Artifacts collected:"
+        Write-Host "`nArtifacts collected:"
         Get-ChildItem artifacts\
       shell: powershell
 
