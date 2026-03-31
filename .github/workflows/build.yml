@@ -1,0 +1,93 @@
+name: Build Nidhogg
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Setup MSBuild
+      uses: microsoft/setup-msbuild@v2
+
+    - name: Install Windows Driver Kit
+      run: |
+        # Install WDK for VS 2022 via winget
+        # The windows-latest runner has VS 2022 pre-installed
+        # We need the WDK NuGet or direct install
+        choco install windowsdriverkit11 -y --no-progress
+      shell: powershell
+
+    - name: Find WDK and VS paths
+      id: paths
+      run: |
+        # Locate VS installation
+        $vsPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+        Write-Host "VS Path: $vsPath"
+        
+        # Check for WDK
+        $wdkPaths = @(
+          "${env:ProgramFiles(x86)}\Windows Kits\10",
+          "${env:ProgramFiles}\Windows Kits\10"
+        )
+        foreach ($p in $wdkPaths) {
+          if (Test-Path $p) {
+            Write-Host "WDK found at: $p"
+            $versions = Get-ChildItem "$p\Include" -Directory | Sort-Object Name -Descending
+            Write-Host "Available WDK versions: $($versions.Name -join ', ')"
+          }
+        }
+      shell: powershell
+
+    - name: Build Driver (Nidhogg.sys) - Release x64
+      run: |
+        msbuild Nidhogg\Nidhogg.vcxproj /p:Configuration=Release /p:Platform=x64 /t:Build /m
+      shell: cmd
+
+    - name: Build Client (NidhoggClient.exe) - Release x64
+      run: |
+        msbuild NidhoggClient\NidhoggClient.vcxproj /p:Configuration=Release /p:Platform=x64 /t:Build /m
+      shell: cmd
+
+    - name: Collect artifacts
+      run: |
+        mkdir artifacts
+        # Driver
+        if (Test-Path "x64\Release\Nidhogg\Nidhogg.sys") {
+          Copy-Item "x64\Release\Nidhogg\Nidhogg.sys" artifacts\
+        }
+        if (Test-Path "x64\Release\Nidhogg.sys") {
+          Copy-Item "x64\Release\Nidhogg.sys" artifacts\
+        }
+        # Client
+        if (Test-Path "x64\Release\NidhoggClient.exe") {
+          Copy-Item "x64\Release\NidhoggClient.exe" artifacts\
+        }
+        if (Test-Path "x64\Release\NidhoggClient\NidhoggClient.exe") {
+          Copy-Item "x64\Release\NidhoggClient\NidhoggClient.exe" artifacts\
+        }
+        # Search more broadly for output files
+        Get-ChildItem -Recurse -Include "Nidhogg.sys","NidhoggClient.exe" | ForEach-Object {
+          Write-Host "Found: $($_.FullName)"
+          Copy-Item $_.FullName artifacts\ -Force
+        }
+        Write-Host "Artifacts collected:"
+        Get-ChildItem artifacts\
+      shell: powershell
+
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: nidhogg-release-x64
+        path: artifacts/
+        if-no-files-found: error
